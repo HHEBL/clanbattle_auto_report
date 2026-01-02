@@ -5,20 +5,40 @@ import time
 from nonebot import get_bot
 from .create_img import general_img
 from .accurateassis import accurateassis
+from .support_tools import (
+    get_scene_config,
+    find_character_by_name,
+    get_qq_id,
+    parse_support_units,
+    check_character_in_support,
+    change_support_unit,
+    remove_support_unit,
+    COOLDOWN_TIME
+)
+from .task_manager import task_manager
 from ..login import query
 from ..util.text2img import image_draw
 from ..util.tools import load_config, DATA_PATH
-from ..clanbattle import clanbattle_info
-from ..clanbattle.model import ClanBattle
 from hoshino import Service, priv
-from hoshino.typing import CQEvent
+from hoshino.typing import CQEvent, NoticeSession, MessageSegment
 from hoshino.util import pic2b64
-from hoshino.typing import NoticeSession, MessageSegment
-from hoshino.modules.priconne._pcr_data import CHARA_NAME
 from hoshino.modules.convert2img.convert2img import grid2imgb64
 
 help_text = '''
-【(上|挂|换|更换|切换|修改)(地下城|公会|公会战|会战|工会战|工会|露娜|露娜塔|关卡|活动|深域|深渊)(支援|助战)XX】XX为角色名（支持常用外号），机器人会自动找到并替换助战，并返回该角色的详细信息
+【换助战】
+格式：(换|挂|上)(场景(可不填))(助战) 角色名 (@目标用户(可不填))
+场景：地下城/公会战(会战)/露娜塔/关卡(活动)，不填默认为公会战
+示例：换助战优衣 / 挂地下城助战妹法 / 上深域助战克总 @目标用户
+
+• 不@目标用户时：
+  - 公会战：换出刀监控人的助战
+  - 地下城&露娜塔&关卡&深域：换自己的助战
+• @目标用户时，换目标用户的助战：
+  - 管理员：无需确认，直接执行
+  - 普通用户：需要对方回复"同意"，以防顶号（3分钟内有效）
+• 同意/拒绝：同意或拒绝别人发起的换助战请求
+
+注意：角色如在其他位置助战中，会自动取下后放到目标位置
 ========================================================
 【刷新box缓存】会顶号，请注意，机器人自动上号记录你的box
 【box查询+角色名字】（@别人可以查别人，角色名输入【所有】则都查）
@@ -158,166 +178,194 @@ async def refreshAndShowSupportInfo(bot, ev, client, cname, qq_id):
         raise
 
 
+# 执行换助战的核心逻辑
+async def change_support(bot, ev, scene: str, chara_id: int, chara_name: str, qq_id: int, group_id: int):
+    """
+    执行换助战的核心逻辑
+    
+    Args:
+        bot: bot实例
+        ev: 事件对象
+        scene: 场景（地下城/公会战等）
+        chara_id: 角色ID
+        chara_name: 角色名称
+        qq_id: 目标用户QQ号
+        group_id: 群号
+    """
+    # 获取目标用户的昵称
+    user_info = await bot.get_group_member_info(group_id=group_id, user_id=qq_id)
+    nickname = user_info["card"] or user_info["nickname"]
+    # 判断是否为自己的助战
+    is_self = qq_id == ev.user_id
+    await bot.send(ev, f'正在{"您" if is_self else nickname}的BOX中寻找该角色...')
+    
+    # 登录账号
+    account_info = await load_config(os.path.join(DATA_PATH, 'account', f'{qq_id}.json'))
+    if not account_info:
+        await bot.send(ev, '未找到账号信息')
+        return
+    # 获取客户端实例
+    client = await query(account_info)
+    
+    # 获取助战位信息
+    support_data = await client.callapi('/support_unit/get_setting', {})
+    clan_dungeon_units = support_data['clan_support_units']
+    friend_units_data = support_data['friend_support_units']
+    all_support_units = clan_dungeon_units + friend_units_data
+    # 助战位信息格式化
+    units_dict = parse_support_units(clan_dungeon_units, friend_units_data)
+    # 检查角色是否已在助战中
+    is_in_support, pos_name, old_support_type, old_position = check_character_in_support(all_support_units, chara_id)
+    if is_in_support:
+        await bot.send(ev, f'检测到角色已在{pos_name}助战中，正在取下...')
+        # 先取下原位置的角色
+        remove_success = await remove_support_unit(client, old_support_type, old_position)
+        if not remove_success:
+            await bot.send(ev, '取下角色失败')
+            return
+        await bot.send(ev, '已取下，正在放置到目标位置...')
+    
+    config = get_scene_config(scene)
+    target_units = units_dict[config['units_key']]
+    units_name = config['display_name']
+    # 检查目标助战位
+    for index, unit in enumerate(target_units):
+        # 是否超过30分钟冷却
+        time_diff = int(time.time() - unit['support_start_time'])
+        if time_diff > COOLDOWN_TIME:
+            unit_id = int(str(chara_id) + '01')
+            position = index + config['position_offset']
+            # 更换助战角色
+            success = await change_support_unit(client, config['support_type'], position, unit_id)
+            if not success:
+                await bot.send(ev, '操作失败')
+                return
+            # 发送提示消息
+            await bot.send(ev, f'已将{nickname}的{chara_name}挂至{units_name}{index + 1}号助战位中')
+            # 发送助战角色信息图片
+            await refreshAndShowSupportInfo(bot, ev, client, chara_name, qq_id)
+            return
+    
+    # 助战位都未超过30分钟的提示
+    await bot.send(ev, '操作失败！可能是两个助战位都未超过30分钟')
+
+
 @sv.on_rex(r"^(上|挂|换|切换|更换|修改)(地下城|公会|公会战|会战|工会战|工会|露娜|露娜塔|关卡|活动|深域|深渊)?(支援|助战) ?(\S+)$")
-async def change_support(bot, ev: CQEvent):
-    # 切割指令获取目标角色
+async def change_support_command(bot, ev: CQEvent):
+    # 获取助战场景（地下城/会战/露娜塔/关卡/深域）
     match = ev['match']
     scene = match.group(2) if match.group(2) else "公会战"
+    # 获取指令中的角色名/外号
     target_chara = match.group(4).strip()
-    chara_id = 0
-
-    # 从角色 id-外号 映射表中查找目标角色id
-    for CHARA_ID in CHARA_NAME:
-        if target_chara in CHARA_NAME[CHARA_ID]:
-            print(target_chara)
-            chara_id = CHARA_ID
-            chara_name = CHARA_NAME[CHARA_ID][0]
-            await bot.send(ev, f'已确定您说的是{chara_name}')  # 根据外号识别出角色真名和id
-            break
-
-    # 无法根据外号识别角色
+    
+    # 寻找角色ID和正式名称
+    chara_id, chara_name = find_character_by_name(target_chara)
     if chara_id == 0:
-        await bot.send(ev, f'未找到{target_chara}！请使用其他名称重试')  
+        await bot.send(ev, f'未找到{target_chara}！请使用其他名称重试')
         return
-
-    # 关卡助战位 占位元素
-    friend_units = [
-        {'unit_id': 100000, 'position': 1, 'support_start_time': 0, 'clan_support_count': 1},
-        {'unit_id': 100000, 'position': 2, 'support_start_time': 0, 'clan_support_count': 0}
-    ]
     
-    # 地下城助战位 占位元素
-    dungeon_units = [
-        {'unit_id': 100000, 'position': 1, 'support_start_time': 0, 'clan_support_count': 1},
-        {'unit_id': 100000, 'position': 2, 'support_start_time': 0, 'clan_support_count': 0}
-    ]
+    await bot.send(ev, f'已确定您说的是{chara_name}')
     
-    # 会战助战位 占位元素
-    clan_units = [
-        {'unit_id': 100000, 'position': 3, 'support_start_time': 0, 'clan_support_count': 1},
-        {'unit_id': 100000, 'position': 4, 'support_start_time': 0, 'clan_support_count': 0}
-    ]
-
-    # 获取指定的成员的信息
+    # 获取 群号 和 目标用户的QQ号
     group_id = ev.group_id
-    isClanBattle = scene == "公会战" or scene == "会战" or scene == "工会战" or scene == "工会" or scene == "公会"
-    if isClanBattle:
-        if len(ev.message) == 3 and ev.message[0].type == 'text' and ev.message[1].type == 'at':
-            qq_id = int(ev.message[1].data['qq'])
+    qq_id, error_msg = get_qq_id(ev, scene, group_id)
+    
+    # 检查是否获取到有效的QQ号
+    if qq_id == 0:
+        await bot.send(ev, f'获取目标用户失败：{error_msg}')
+        return
+    
+    # 判断是否@了别人
+    is_at = len(ev.message) == 3 and ev.message[0].type == 'text' and ev.message[1].type == 'at'
+    
+    if is_at:
+        # @了别人，需要检查权限
+        operator_qq = ev.user_id
+        
+        # 检查操作者是否是管理员
+        if priv.check_priv(ev, priv.ADMIN):
+            # 管理员直接执行
+            await bot.send(ev, '检测到管理员权限，直接执行换助战操作')
+            await change_support(bot, ev, scene, chara_id, chara_name, qq_id, group_id)
         else:
-            clan_info: ClanBattle = clanbattle_info[group_id]
-            qq_id = clan_info.qq_id
+            # 非管理员，需要目标用户确认
+            # 先清理过期任务
+            task_manager.clear_expired_tasks()
+            
+            # 创建任务
+            task = task_manager.add_task(qq_id, chara_id, chara_name, scene, group_id, operator_qq)
+            
+            # 获取操作者和目标用户的昵称
+            operator_info = await bot.get_group_member_info(group_id=group_id, user_id=operator_qq)
+            operator_name = operator_info["card"] or operator_info["nickname"]
+            
+            target_info = await bot.get_group_member_info(group_id=group_id, user_id=qq_id)
+            target_name = target_info["card"] or target_info["nickname"]
+            
+            await bot.send(ev, 
+                f'{operator_name}请求将{target_name}的{chara_name}更换到{scene}助战位\n'
+                f'[CQ:at,qq={qq_id}] 请在3分钟内回复"同意"或"拒绝"')
     else:
-        if len(ev.message) == 3 and ev.message[0].type == 'text' and ev.message[1].type == 'at':
-            qq_id = int(ev.message[1].data['qq'])
-        else:
-            qq_id = ev.user_id
-    user_info = await bot.get_group_member_info(group_id = group_id, user_id = qq_id)
-    nickname = user_info["card"] or user_info["nickname"]
-    await bot.send(ev, f'正在{nickname if isClanBattle else "您"}的BOX中寻找该角色...')
-    # 登录账号
-    acccount_info = await load_config(os.path.join(DATA_PATH, 'account', f'{qq_id}.json'))
+        # 没有@别人，换自己的助战，直接执行
+        await change_support(bot, ev, scene, chara_id, chara_name, qq_id, group_id)
 
-    if acccount_info != []:
-        client = await query(acccount_info)
-        # 调API获取助战位置信息
-        # 神坑，pcr竟然将地下城助战和公会助战放在一个数组里，没挂助战的位置还获取不到信息
-        all_support_units = await client.callapi('/support_unit/get_setting', {})
-        clan_dungeon_support_units = all_support_units['clan_support_units']
-        friend_support_units = all_support_units['friend_support_units']
-        all_support_units = all_support_units['clan_support_units'] + all_support_units['friend_support_units']
-        # 过滤一遍只留下公会助战
-        for unit in clan_dungeon_support_units:
-            if unit['position'] in (1, 2):
-                index = unit['position'] - 1
-                dungeon_units[index] = unit
 
-            if unit['position'] in (3, 4):
-                index = unit['position'] - 3
-                clan_units[index] = unit
+@sv.on_fullmatch('同意')
+async def confirm_change_support(bot, ev: CQEvent):
+    """处理用户确认换助战的请求"""
+    qq_id = ev.user_id
+    group_id = ev.group_id
+    
+    # 先清理过期任务
+    task_manager.clear_expired_tasks()
+    
+    # 查找该用户的待确认任务
+    task = task_manager.get_task(qq_id)
+    
+    if not task:
+        await bot.send(ev, '没有找到待确认的换助战任务')
+        return
+    
+    # 检查群号是否一致
+    if task.group_id != group_id:
+        await bot.send(ev, '该任务不是在本群发起的')
+        return
+    
+    # 检查是否过期
+    if task.is_expired(180):
+        task_manager.remove_task(qq_id)
+        await bot.send(ev, '任务已过期（超过3分钟），请重新发起请求')
+        return
+    
+    # 获取操作者昵称
+    operator_info = await bot.get_group_member_info(group_id=group_id, user_id=task.operator_qq)
+    operator_name = operator_info["card"] or operator_info["nickname"]
+    
+    # 任务有效，执行换助战操作
+    await bot.send(ev, f'已确认{operator_name}的请求，开始执行换助战操作')
+    
+    # 删除任务
+    task_manager.remove_task(qq_id)
+    
+    # 执行换助战
+    await change_support(bot, ev, task.scene, task.chara_id, task.chara_name, qq_id, group_id)
 
-        for unit in friend_support_units:
-            if unit['position'] in (1, 2):
-                index = unit['position'] - 1
-                friend_units[index] = unit
-        
-        # 检查角色是否已在助战中，当助战角色被挂到其他场景的助战位时也提示操作失败
-        for unit in all_support_units:
-            unit_id = int(str(unit['unit_id'])[:-2])
-            if chara_id == unit_id:
-                if 'friend_support_reward' in unit:
-                    pos = "关卡&活动"
-                else:
-                    if unit['position'] in (1, 2):
-                        pos = "地下城"
-                    else:
-                        pos = "公会&露娜塔"
-                await bot.send(ev, f'操作失败，角色已经在{pos}助战中!')
-                return
-        
-        # 遍历两个公会助战位，尝试挂角色
-        target_units = []
-        support_type = 1
-        position_offset = 1
-        units_name = ""
-        if scene == '地下城':
-            target_units = dungeon_units
-            units_name = "地下城"
-        elif scene == '公会' or scene == '工会' or scene == '工会战' or scene == '公会战':
-            target_units = clan_units
-            position_offset = 3
-            units_name = "公会战"
-        elif scene == '露娜' or scene == '露娜塔':
-            target_units = clan_units
-            position_offset = 3
-            units_name = "露娜塔"
-        elif scene == '关卡' or scene == '活动' or scene == '深域' or scene == '深渊':
-            target_units = friend_units
-            support_type = 2
-            units_name = "关卡&活动"
-        
-        for index, unit in enumerate(target_units):
-            # 检查冷却时间
-            unit_time = unit['support_start_time']
-            now = time.time()
-            diff = int(now - unit_time)
-            if diff > 1800:
-                unit_id = int(str(chara_id) + '01')
-                try:
-                    # 卸下原角色
-                    await client.callapi('/support_unit/change_setting', {
-                        'support_type': support_type,
-                        'position': index + position_offset,
-                        'action': 2,
-                        'unit_id': unit_id
-                    })
-                    time.sleep(3)
-                    # index_infos = await client.callapi('/load/index', {'carrier': 'OPPO'})
-                    # if "server_error" in index_infos:
-                    #     await bot.send(ev, "网络异常")
-                    # user_ex_equip = index_infos['user_ex_equip'] or []
-                    # if user_ex_equip:
-                    #     for ex_equip in user_ex_equip:
-                    #         if ex_equip['ex_equipment_id'] == 10000 and ex_equip['enhancement_pt'] == 6000 and ex_equip['rank'] == 2:
-                    #             target_weapon = ex_equip['serial_id']
-                    # time.sleep(3)
-                    # 挂上新角色
-                    await client.callapi('/support_unit/change_setting', {
-                        'support_type': support_type,
-                        'position': index + position_offset,
-                        'action': 1,
-                        'unit_id': unit_id
-                    })
-                    msg = f'已将{nickname}的{chara_name}挂至{units_name}{index + 1}号助战位中'
-                    await bot.send(ev, msg)   
-                except:
-                    await bot.send(ev, '操作失败')
-                    pass
-                
-                await refreshAndShowSupportInfo(bot, ev, client, chara_name, qq_id) # 图片展示挂上去的助战的数据
-                return
 
-        await bot.send(ev,'操作失败！可能是两个助战位都未超过30分钟')
+@sv.on_fullmatch('拒绝')
+async def reject_change_support(bot, ev: CQEvent):
+    """处理用户拒绝换助战的请求"""
+    qq_id = ev.user_id
+    
+    # 查找该用户的待确认任务
+    task = task_manager.get_task(qq_id)
+    
+    if not task:
+        await bot.send(ev, '没有找到待确认的换助战任务')
+        return
+    
+    # 删除任务
+    task_manager.remove_task(qq_id)
+    await bot.send(ev, '已取消换助战请求')
 
 
 @sv.on_prefix('box查询')
