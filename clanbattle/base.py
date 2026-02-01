@@ -100,21 +100,27 @@ async def get_stat(data,group_id):
     img = image_draw(msg)
     return img
 
-async def cuidao(data, dnum, group_id):
-    if dnum < 1 or dnum > 3:
-        msg = "您输入的数字不合法！"
-        return msg
+async def cuidao(members, knife_nums, group_id):
+    if knife_nums != -1 and (knife_nums < 1 or knife_nums > 3):
+        return False, []
 
     config_file = os.path.join(clan_path, f'{group_id}',"clanbattle.json")
     config = await load_config(config_file)
 
-    member_finished = dict()
-    for member in data:
-        if member[2] >= (4 - dnum):
-            member_finished[member[1]] = member[0]
-    key_difference = set(config["member"].keys()) - set(member_finished.keys())
-    members = {k: config["member"][k] for k in key_difference}
-    return members.values()
+    finished_members = dict()
+    all_members = config["member"]
+    if knife_nums == -1:
+        for member in members:
+            if member[2] < 3:
+                finished_members[member[1]] = member[0]
+    else:
+        for member in members:
+            if member[2] == (3 - knife_nums):
+                finished_members[member[1]] = member[0]
+    unfinished_members = set(all_members.keys()) - set(finished_members.keys())
+    remind_members = {k: all_members[k] for k in unfinished_members}
+    
+    return True, remind_members.values()
 
 async def get_cbreport(data,total_damage,total_score):
     reply = []

@@ -517,37 +517,31 @@ class RecordDao(SqliteDao):
 class MemberDict(SqliteDao):
     def __init__(self, groupid):
         super().__init__(
-            table = 'memdict',
-            columns = 'gid, gname, qid, qname',
+            table = 'members',
+            columns = 'pcr_id, qq_id',
             fields = '''
-            gid INT NOT NULL,
-            gname TEXT NOT NULL,
-            qid INT NOT NULL,
-            qname TEXT NOT NULL
+            pcr_id INT NOT NULL PRIMARY KEY,
+            qq_id INT NOT NULL
             ''',
             groupid = groupid
         )
 
-    def add_mem_pair(self, gid, gname, qid, qname):
+    def add_member_pair(self, pcr_id, qq_id):
         with self._connect() as conn:
             try:
-                isExist = conn.execute(f'SELECT * FROM {self._table} where gid = {gid}').fetchone()
+                isExist = conn.execute(f'SELECT * FROM {self._table} where pcr_id = {pcr_id}').fetchone()
                 if isExist:
-                    conn.execute(f"UPDATE {self._table} SET gname = '{gname}', qid = {qid}, qname = '{qname}' where gid = {gid}")
+                    conn.execute(f"UPDATE {self._table} SET qq_id = {qq_id} where pcr_id = {pcr_id}")
                 else:
-                    conn.execute(f"INSERT INTO {self._table} (gid, gname, qid, qname) VALUES ({gid}, '{gname}', {qid}, '{qname}')")
+                    conn.execute(f"INSERT INTO {self._table} (pcr_id, qq_id) VALUES ({pcr_id}, {qq_id})")
             except:
                 raise
     
-    def search_member(self, gid = 0, gname = ""):
-        mem_info = None
+    def search_member(self, pcr_id = 0):
+        member_info = None
         with self._connect() as conn:
             try:
-                if gid:
-                    mem_info = conn.execute(f'SELECT * FROM {self._table} where gid = {gid}').fetchone()
-                elif gname:
-                    mem_info = conn.execute(f'SELECT * FROM {self._table} where gname = "{gname}"').fetchone()
-
-                return mem_info
+                member_info = conn.execute(f'SELECT * FROM {self._table} where pcr_id = {pcr_id}').fetchone()
+                return member_info
             except:
                 raise

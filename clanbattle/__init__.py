@@ -18,7 +18,7 @@ from ..pcrclient import init_device_id
 help_text = '''
 * “+” 表示空格
 【出刀监控】机器人登录账号，监视出刀情况并记录
-【一键提醒】提醒未出完刀的群友
+【一键提醒( + 数字)】提醒未出完刀的群友
 【当前战报】本期会战出刀情况
 【我的战报 + 游戏名称】 栞栞个人出刀情况
 【今日战报 + 游戏名称】 栞栞今日个人出刀情况
@@ -554,58 +554,58 @@ async def correct_dao(bot, ev):
     else:
         await bot.send(ev, "请检查你输入了正确的出刀编号")
     
-# 查找群友群名片中是否包含某个游戏内昵称
-def isMemberExist(gname, qmemdict):
-    for qname in qmemdict.keys():
-        if gname in qname:
-            return qname
+# 查询当前游戏内昵称是否是某个群友昵称的子串
+def isMemberExist(pcr_nickname, qq_group_member_dict):
+    for qq_nickname in qq_group_member_dict.keys():
+        if pcr_nickname in qq_nickname:
+            return qq_nickname
     return None
 
 @sv.on_prefix('一键关联')
 async def onekey_connect(bot, ev):
     group_id = ev.group_id
-    isStrict = ev.message.extract_plain_text().strip()
+    isStrict = ev.message.extract_plain_text().strip() == 's' or ev.message.extract_plain_text().strip() == 'S'
 
     # 获取会战成员信息
-    config_file = os.path.join(clan_path, f'{group_id}',"clanbattle.json")
+    config_file = os.path.join(clan_path, f'{group_id}', "clanbattle.json")
     config = await load_config(config_file)
     if config:
-        gmembers = dict(config["member"])
+        pcr_members = dict(config["member"])
     else:
         await bot.send(ev, "暂无本群公会成员数据！")
         return
     
     # 获取群成员信息
-    qmem_dict = dict()
-    qmembers = await bot.get_group_member_list(group_id = group_id)
-    for qmem in qmembers:
-        key = qmem['card'] or qmem['nickname']
-        qmem_dict[key] = qmem['user_id']
+    qq_group_member_dict = dict()
+    qq_group_members = await bot.get_group_member_list(group_id = group_id)
+    for qq_group_member in qq_group_members:
+        qq_nickname = qq_group_member['card'] or qq_group_member['nickname']
+        qq_group_member_dict[qq_nickname] = qq_group_member['user_id']
 
     # 子串匹配
     unfind = []
     db = MemberDict(group_id)
-    for gname, gid in gmembers.items():
+    for pcr_nickname, pcr_id in pcr_members.items():
         # 非严格模式下会跳过数据库中已存在的成员
-        if not (isStrict == 's' or isStrict == 'S'):
-            mem_info = db.search_member(gid, gname)
-            if mem_info: continue
+        if not (isStrict):
+            member_info = db.search_member(pcr_id)
+            if member_info: continue
         # 查看游戏昵称是否为某个群昵称的子串
-        qname = isMemberExist(gname, qmem_dict)
-        if qname:
-            qid = qmem_dict[qname]
-            db.add_mem_pair(gid, gname, qid, qname) # 添加到数据库
+        qq_nickname = isMemberExist(pcr_nickname, qq_group_member_dict)
+        if qq_nickname:
+            qq_id = qq_group_member_dict[qq_nickname]
+            db.add_member_pair(pcr_id, qq_id) # 添加到数据库
         else:
-            unfind.append((gid, gname)) # 加入未找到列表
+            unfind.append((pcr_id, pcr_nickname)) # 加入未找到列表
     
     # 输出提示
     msg = f"公会成员与QQ群成员关联完成"
     if unfind:
         msg += "，但仍有以下公会成员未能与群内成员关联：\n"
-        for ginfo in unfind:
-            gid = ginfo[0]
-            gname = ginfo[1]
-            msg += f"{gid} {gname}\n"
+        for pcr_info in unfind:
+            pcr_id = pcr_info[0]
+            pcr_nickname = pcr_info[1]
+            msg += f"{pcr_id} {pcr_nickname}\n"
         msg += "=========\n请尝试手动关联"
         if isStrict == 's' or isStrict == 'S':
             msg += "\n注意：严格模式会强制更新成功关联的成员的信息，并展示所有未能成功关联的成员，即使这些成员在数据库中可能存有旧数据"
@@ -620,12 +620,9 @@ def find_keys_by_value(d, target_value):
 @sv.on_prefix('关联')
 async def manual_connect(bot, ev):
     group_id = ev.group_id
-    ginfo = ev.message.extract_plain_text().strip()
-
-    content = ev.raw_message
-    if '[CQ:at,qq=' in content:
-        qid = re.findall(r"CQ:at,qq=([0-9]+)",content)[0]
-        print(qid)
+    if len(ev.message) == 3 and ev.message[0].type == 'text' and ev.message[1].type == 'at':
+        pcr_id = ev.message[0].data['text']
+        qq_id = int(ev.message[1].data['qq'])
     else:
         await bot.send(ev, "请@你想关联的群内成员！")
         return
@@ -634,63 +631,51 @@ async def manual_connect(bot, ev):
     config_file = os.path.join(clan_path, f'{group_id}',"clanbattle.json")
     config = await load_config(config_file)
     if config:
-        gmembers = dict(config["member"])
+        pcr_members = dict(config["member"])
     else:
         await bot.send(ev, "暂无本群公会成员数据！")
         return
     
-    # 获取此成员信息
-    qinfo = await bot.get_group_member_info(group_id = group_id, user_id = qid)
-    qname = qinfo['card'] or qinfo['nickname']
-    
     # 通过已有信息获取其他信息
-    if ginfo.isdigit() and len(ginfo) == 13:
-        gid = int(ginfo)
-        if gid in gmembers.values():
-            gname = ""
-            results = find_keys_by_value(gmembers, gid)
-            if results:
-                gname = results[0]
-        else:
+    if pcr_id.isdigit() and len(pcr_id) == 13:
+        pcr_id = int(pcr_id)
+        if not (pcr_id in pcr_members.values()):
             await bot.send(ev, "此游戏ID不在公会中")
             return
     else:
-        gname = ginfo
-        try:
-            gid = gmembers[gname]
-        except:
-            await bot.send(ev, "此游戏昵称不在公会中")
-            pass
+        await bot.send(ev, "不合法的游戏ID！")
 
     # 绑定游戏id与qq
     db = MemberDict(group_id)
-    db.add_mem_pair(gid, gname, qid, qname)
+    db.add_member_pair(pcr_id, qq_id)
 
-    msg = f'已关联：{gid} {gname} {qid} {qname}'
-    await bot.send(ev, msg)
+    await bot.send(ev, "关联成功")
 
 
 @sv.on_prefix('一键提醒')
 async def nei_gui(bot, ev):
-    dnum = 1
-    num_str = ev.message.extract_plain_text().strip()
-    if num_str: dnum = int(num_str)
-    print(dnum)
+    knife_nums = -1
+    knife_nums_str = ev.message.extract_plain_text().strip()
+    if knife_nums_str and knife_nums_str.isdigit():
+        knife_nums = int(knife_nums_str)
 
     group_id = ev.group_id
-    rdb = RecordDao(group_id)
-    data = rdb.get_day_rcords(int(time.time()))
+    db = RecordDao(group_id)
+    data = db.get_day_rcords(int(time.time()))
     if not data:
         await bot.send(ev, "数据库为空，请确保开启出刀监控或使用“回归性原理”进行修正")
     else:
-        players = day_report(data)
-        gids = await cuidao(players, dnum, group_id)
-        if gids:
-            mdb = MemberDict(group_id)
-            msg = f"以下{len(gids)}位成员每人还有至少{dnum}刀没有出：\n"
-            for gid in gids:
-                result = mdb.search_member(gid)
-                msg += f'[CQ:at,qq={result[2]}]\n'
+        members = day_report(data)
+        is_succ, pcr_ids = await cuidao(members, knife_nums, group_id)
+        if not is_succ:
+            await bot.send(ev, "提醒失败，请输入合法的刀数！")
+            return
+        if pcr_ids:
+            mem_db = MemberDict(group_id)
+            msg = f"以下{len(pcr_ids)}位成员每人还有{knife_nums}刀没有出：\n" if knife_nums != -1 else f"以下{len(pcr_ids)}位成员还没出完刀：\n"
+            for pcr_id in pcr_ids:
+                result = mem_db.search_member(pcr_id)
+                msg += f'[CQ:at,qq={result[1]}]\n'
             msg += "======\n记得出刀呀，会长还在等你们哦！"
         else:
             msg = "今天的刀都出完啦！感谢大家！"
